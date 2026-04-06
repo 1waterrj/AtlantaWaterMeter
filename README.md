@@ -20,6 +20,7 @@ The goals of this project are:
 
 ## Requirements
 
+- **Python 3.14** — The container image is based on the official `python:3.14-slim-trixie` image. Local edits to `daemon.sh` should use `python3` compatible with 3.x (see `.python-version`).
 - Raspberry Pi 3 (Might work on others, only tested on the 3)
 - [RTL-SDR](https://www.amazon.com/NooElec-NESDR-Mini-Compatible-Packages/dp/B009U7WZCA)
 - [Resin.io](https://resin.io) for deployment and installation to the Raspberry pi
@@ -41,7 +42,95 @@ You'll need to be able to do the following to get this to work:
 1. `git push` this repository to your Resin application
 1. In Resin, view the logs on your device and find your meter ID. This is hardest part. You'll need to know your current reading to match it up to the meter ID. I've not found any correlation between what's written on the meter and the ID being sent out over the air.
 1. Once you find your meter ID, enter it as an environment variable in the Resin dashboard under "METERID"
-1. At this point it's up to you as to where you want to 'send' the data. I log to a Google Spreadsheet and have provided instructions at the end of this README
+1. At this point it's up to you as to where you want to 'send' the data. You can publish to **MQTT** (recommended for [Home Assistant](https://www.home-assistant.io/integrations/mqtt/)), use a custom HTTP endpoint via `CURL_API`, or log to a Google Spreadsheet (instructions below).
+
+## Repository layout
+
+| Path | Role |
+|------|------|
+| `scripts/daemon.sh` | RTL TCP + rtlamr loop, MQTT, optional HTTP logging |
+| `scripts/watchdog.sh` | Stale-process watchdog (Balena/Resin supervisor reboot) |
+| `meter/payload.py` | **Canonical reading JSON** — schema version, timestamp, scaled `consumption`, full rtlamr payload under `radio` |
+| `meter/ha_discovery.py` | **Home Assistant MQTT discovery** — retained config on `homeassistant/sensor/.../config` |
+| `Dockerfile` | Runtime image: Python 3.14, rtl-sdr, rtlamr, MQTT client |
+| `Baseimage/Dockerfile` | Optional: build rtl-sdr from source for custom bases |
+
+Keeping parsing in small Python modules keeps the shell script thin and gives you one place to evolve the data contract (Home Assistant automations, future InfluxDB, etc.).
+
+## MQTT and Home Assistant
+
+When `MQTT_HOST` is set, each successful read publishes a **versioned JSON** reading (see below). Raw rtlamr output is optional on a second topic.
+
+### Topic layout
+
+- **Flat (default):** if you set neither `MQTT_TOPIC` nor `MQTT_TOPIC_PREFIX`, the reading is published to topic `water_meter`.
+- **Hierarchical (recommended for multiple devices or clearer ACLs):** set `MQTT_TOPIC_PREFIX` (e.g. `home/water_meter`) and **omit** `MQTT_TOPIC`. The reading goes to `{MQTT_TOPIC_PREFIX}/{METERID}/reading`.
+- **Explicit:** set `MQTT_TOPIC` to the full topic string (wins over `MQTT_TOPIC_PREFIX`).
+
+Raw rtlamr JSON on a second topic:
+
+- Set `MQTT_TOPIC_RADIO` to a full topic, **or**
+- Set `MQTT_PUBLISH_RADIO=1` together with `MQTT_TOPIC_PREFIX` to publish to `{MQTT_TOPIC_PREFIX}/{METERID}/radio`.
+
+### Environment variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `MQTT_HOST` | Yes, to enable MQTT | Broker hostname or IP |
+| `MQTT_PORT` | No | Broker port (default `1883`) |
+| `MQTT_TOPIC` | No | Full topic for the reading JSON (overrides prefix-based topic) |
+| `MQTT_TOPIC_PREFIX` | No | Prefix for `{prefix}/{METERID}/reading` (and optional `.../radio`) |
+| `MQTT_USER` | No | Username |
+| `MQTT_PASSWORD` | No | Password |
+| `MQTT_TLS` | No | Set to `1` to use TLS (`--tls-use-os-certs`; typical with port `8883`) |
+| `MQTT_RETAIN` | No | Set to `1` to retain the last message on the broker |
+| `MQTT_TOPIC_RADIO` | No | Full topic for raw rtlamr JSON only |
+| `MQTT_PUBLISH_RADIO` | No | Set to `1` with `MQTT_TOPIC_PREFIX` to also publish raw JSON to `{prefix}/{METERID}/radio` |
+| `MQTT_DISABLE_DISCOVERY` | No | Set to `1` to skip [MQTT discovery](https://www.home-assistant.io/integrations/mqtt/#mqtt-discovery) (manual YAML only) |
+| `MQTT_DISCOVERY_PREFIX` | No | Discovery prefix (default `homeassistant`) |
+| `MQTT_DEVICE_NAME` | No | Friendly name for the sensor/device (default `Water meter`) |
+| `MQTT_SW_VERSION` | No | Reported firmware/software version (default `1.0`) |
+
+### Home Assistant MQTT discovery
+
+When `MQTT_HOST` is set and `MQTT_DISABLE_DISCOVERY` is **not** `1`, the container publishes a **retained** discovery message at startup to:
+
+`{MQTT_DISCOVERY_PREFIX}/sensor/water_meter_{METERID}/config`
+
+(Non-alphanumeric characters in `METERID` are replaced with `_` in the topic `object_id`.)
+
+In Home Assistant, ensure the MQTT integration has **discovery** enabled (it is on by default). The **Water meter** sensor should appear automatically; no manual `configuration.yaml` entry is required for the sensor itself.
+
+### Reading payload (`meter/payload.py`)
+
+Consumers should check `schema_version` when you change fields. Current version is **1**.
+
+| Field | Meaning |
+|-------|---------|
+| `schema_version` | Integer; bump when you change shape or semantics |
+| `timestamp` | UTC time of this reading (`YYYY-MM-DDTHH:MM:SSZ`) |
+| `consumption` | Scaled reading (same units as container logs: CCF or cubic meters) |
+| `unit` | `CCF`, `Cubic Meters`, etc. |
+| `meter_id` | Your `METERID` |
+| `radio` | Full rtlamr JSON object (time, offset, message fields, etc.) |
+
+### Home Assistant manual configuration (optional)
+
+If you disabled discovery (`MQTT_DISABLE_DISCOVERY=1`), define the sensor manually:
+
+```yaml
+mqtt:
+  sensor:
+    - name: "Water meter"
+      state_topic: "water_meter"
+      value_template: "{{ value_json.consumption }}"
+      unit_of_measurement: "CCF"
+      json_attributes_topic: "water_meter"
+      json_attributes_template: "{{ value_json.radio }}"
+
+```
+
+With `MQTT_TOPIC_PREFIX=home/water_meter` and `METERID=12345678`, use `state_topic` / `json_attributes_topic`: `home/water_meter/12345678/reading`. Change `unit_of_measurement` if you use `METRIC`.
 
 ## Logging to Google Spreadsheet
 

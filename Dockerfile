@@ -1,27 +1,26 @@
-FROM mpercival/resin-rtl-sdr
+FROM python:3.14-slim-trixie
 
-MAINTAINER Mark Percival
+LABEL org.opencontainers.image.title="AtlantaWaterMeter" \
+      org.opencontainers.image.description="RTL-SDR water meter reader for Neptune R900"
 
-RUN sudo apt-get update && apt-get install -y curl python && \
-    apt-get clean
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      curl \
+      git \
+      mosquitto-clients \
+      rtl-sdr \
+      golang-go \
+      ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /usr/local
+ENV GOBIN=/usr/local/bin
+RUN go install github.com/bemasher/rtlamr@latest
 
-RUN curl -O https://storage.googleapis.com/golang/go1.7.4.linux-armv6l.tar.gz && \
-    tar xvf go1.7.4.linux-armv6l.tar.gz
-
-RUN mkdir /go
-ENV GOPATH /go
-ENV PATH /usr/local/go/bin:/go/bin:$PATH
-
-RUN go get github.com/bemasher/rtlamr
-
-RUN mkdir /app
 WORKDIR /app
 
-COPY daemon.sh .
-COPY watchdog.sh .
-RUN chmod +x *.sh
+COPY meter/ ./meter/
+COPY scripts/ ./scripts/
+RUN chmod +x scripts/*.sh
 
-CMD ./daemon.sh
+ENV PYTHONUNBUFFERED=1
 
+CMD ["./scripts/daemon.sh"]
