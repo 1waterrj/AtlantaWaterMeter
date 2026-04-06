@@ -6,21 +6,24 @@ LABEL org.opencontainers.image.title="AtlantaWaterMeter" \
 RUN apt-get update && apt-get install -y --no-install-recommends \
       curl \
       git \
-      mosquitto-clients \
       rtl-sdr \
       golang-go \
       ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 ENV GOBIN=/usr/local/bin
-RUN go install github.com/bemasher/rtlamr@latest
+RUN go install github.com/bemasher/rtlamr@v0.9.4
 
 WORKDIR /app
 
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
 COPY meter/ ./meter/
-COPY scripts/ ./scripts/
-RUN chmod +x scripts/*.sh
 
 ENV PYTHONUNBUFFERED=1
 
-CMD ["./scripts/daemon.sh"]
+HEALTHCHECK --interval=2m --timeout=15s --start-period=5m --retries=3 \
+  CMD python3 -m meter.healthcheck
+
+CMD ["python3", "-m", "meter.daemon"]

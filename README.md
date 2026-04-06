@@ -10,56 +10,73 @@ Unfortunately this is less elegant and more technically verbose than I would lik
 The goals of this project are:
 - Use a Raspberry Pi and a RTL-SDR to track my smart water meter (Read: cheap, less than $50)
 - Docker to simplify the installation and setup of RTLAMR
-- Resin.io to deploy this docker container to the Raspberry Pi in my house
-- Logging to a Google Spreadsheet so house members can track usage
+- **Docker Compose** on the Pi (or any Linux host with USB access to the RTL-SDR) to run the container
+- Logging via **MQTT / Home Assistant**, optional HTTP (`CURL_API`), or a Google Spreadsheet
 
 ## Credit
 
 - @besmasher - Built the excellent [RTLAMR](https://github.com/bemasher/rtlamr) library which actually does all the work of reading the meters.
-- [Frederik Granna's](https://bitbucket.org/fgranna/) docker base for setting up RTL-SDR on the Raspberry Pi
+- Early RTL-SDR-on-Pi writeups (including community Docker examples) informed older iterations of this project
 
 ## Requirements
 
-- **Python 3.14** — The container image is based on the official `python:3.14-slim-trixie` image. Local edits to `daemon.sh` should use `python3` compatible with 3.x (see `.python-version`).
+- **Python 3.14** — The container image is based on the official `python:3.14-slim-trixie` image. Application code lives under `meter/` (see `.python-version`).
 - Raspberry Pi 3 (Might work on others, only tested on the 3)
 - [RTL-SDR](https://www.amazon.com/NooElec-NESDR-Mini-Compatible-Packages/dp/B009U7WZCA)
-- [Resin.io](https://resin.io) for deployment and installation to the Raspberry pi
+- [Docker](https://docs.docker.com/engine/install/debian/) and [Docker Compose](https://docs.docker.com/compose/) on the Pi (or another Linux machine next to the meter)
 
 ### Technical chops
 
 You'll need to be able to do the following to get this to work:
 
-- Clone and push a repository with 'git'
-- Write a disk image to an SD card
-- Basic script editing
+- Clone a repository with `git` and run `docker compose`
+- Flash Raspberry Pi OS if you use a Pi, or install Docker on your Linux host
+- Basic editing of a `.env` file
 
-## Installation
+## Installation (Docker Compose on Raspberry Pi)
 
-1. Signup for [Resin.io](https://resin.io)
-1. Create a new Application and download the image for the Raspberry Pi
-1. Install the image on the Raspberry Pi
-1. Plug in your RTL-SDR into the USB port on the Raspberry Pi
-1. `git push` this repository to your Resin application
-1. In Resin, view the logs on your device and find your meter ID. This is hardest part. You'll need to know your current reading to match it up to the meter ID. I've not found any correlation between what's written on the meter and the ID being sent out over the air.
-1. Once you find your meter ID, enter it as an environment variable in the Resin dashboard under "METERID"
-1. At this point it's up to you as to where you want to 'send' the data. You can publish to **MQTT** (recommended for [Home Assistant](https://www.home-assistant.io/integrations/mqtt/)), use a custom HTTP endpoint via `CURL_API`, or log to a Google Spreadsheet (instructions below).
+1. Install **Raspberry Pi OS** (64-bit recommended) or another Linux distribution on your Pi, or use an existing host with Docker.
+1. Install **Docker Engine** and the **Docker Compose plugin** (see Docker’s docs for your OS).
+1. Plug the **RTL-SDR** into USB.
+1. Clone this repository on the Pi and enter the directory.
+1. Copy the environment template and edit it: `cp env.example .env` — set at least `MQTT_HOST` / MQTT credentials if you use Home Assistant, and leave `METERID` empty for the first run if you still need to discover your meter ID.
+1. Build and start: `docker compose up -d --build`
+1. Follow logs: `docker compose logs -f`. With **`METERID` unset**, the container runs in **debug mode** and prints nearby meters; match readings to your physical meter to find your ID. This is the hardest step — there is usually no simple correlation between the ID and what is printed on the meter housing.
+1. Add **`METERID=...`** to `.env`, then `docker compose up -d` again.
+1. Point outputs at **MQTT** (recommended), **`CURL_API`**, or Google Sheets (below).
+
+USB access for the SDR uses `privileged: true` and `/dev/bus/usb` in `docker-compose.yml`. If your setup needs different device nodes, adjust that file.
+
+### Watchdog (optional)
+
+The main loop touches `updated.log` on each successful read. A background **watchdog** thread detects if that file goes stale (workaround for long-running `rtl_tcp` issues). To run a command when that happens (e.g. reboot the host), set **`WATCHDOG_REBOOT_CMD`** in `.env` to a shell one-liner. If unset, the watchdog only logs structured messages to stderr — no reboot. Many people rely on `restart: unless-stopped`, **Docker health checks**, and periodic `docker compose restart` instead of rebooting the whole Pi.
+
+### Health check
+
+The image defines a **HEALTHCHECK** that fails if `updated.log` is older than **`HEALTHCHECK_MAX_AGE_SEC`** (default **2400** seconds, 40 minutes — above the default 30‑minute watchdog window). Override **`HEALTHCHECK_LOG`** if you change the file path. Compose repeats the same check in `docker-compose.yml`.
 
 ## Repository layout
 
 | Path | Role |
 |------|------|
-| `scripts/daemon.sh` | RTL TCP + rtlamr loop, MQTT, optional HTTP logging |
-| `scripts/watchdog.sh` | Stale-process watchdog (Balena/Resin supervisor reboot) |
-| `meter/payload.py` | **Canonical reading JSON** — schema version, timestamp, scaled `consumption`, full rtlamr payload under `radio` |
-| `meter/ha_discovery.py` | **Home Assistant MQTT discovery** — retained config on `homeassistant/sensor/.../config` |
-| `Dockerfile` | Runtime image: Python 3.14, rtl-sdr, rtlamr, MQTT client |
-| `Baseimage/Dockerfile` | Optional: build rtl-sdr from source for custom bases |
+| `meter/daemon.py` | Main process: `rtl_tcp` + `rtlamr`, MQTT (**Paho**), optional `curl`, watchdog thread |
+| `meter/mqtt_publisher.py` | MQTT client: TLS, LWT + **availability** topic, discovery + readings |
+| `meter/payload.py` | **Canonical reading JSON** — schema version, timestamp, `consumption`, `radio` |
+| `meter/ha_discovery.py` | Home Assistant MQTT discovery (includes `availability_topic`) |
+| `meter/healthcheck.py` | Docker `HEALTHCHECK` helper |
+| `meter/config.py` | Environment configuration |
+| `Dockerfile` | Python 3.14, **pinned** `rtlamr@v0.9.4`, rtl-sdr, **no** `mosquitto-clients` (MQTT is in-process) |
+| `docker-compose.yml` | Build, USB, `.env`, health check |
+| `requirements.txt` | `paho-mqtt` |
+| `env.example` | Copy to `.env` |
 
-Keeping parsing in small Python modules keeps the shell script thin and gives you one place to evolve the data contract (Home Assistant automations, future InfluxDB, etc.).
+**Logs:** informational and error events are written to **stderr** as **single-line JSON** (`ts`, `level`, `event`, and fields) for easy scraping by Loki or journald.
 
 ## MQTT and Home Assistant
 
-When `MQTT_HOST` is set, each successful read publishes a **versioned JSON** reading (see below). Raw rtlamr output is optional on a second topic.
+When `MQTT_HOST` is set, the app uses **Paho MQTT** with a persistent connection: **Last Will** publishes `offline` to the **availability** topic (default: sibling of the reading topic, e.g. `water_meter/availability` or `home/water_meter/{id}/availability`). On connect it publishes **`online`** (retained). Home Assistant discovery includes `availability_topic` / `payload_available` / `payload_not_available`.
+
+Each successful read publishes a **versioned JSON** reading (see below). Raw rtlamr output is optional on a second topic.
 
 ### Topic layout
 
@@ -90,6 +107,17 @@ Raw rtlamr JSON on a second topic:
 | `MQTT_DISCOVERY_PREFIX` | No | Discovery prefix (default `homeassistant`) |
 | `MQTT_DEVICE_NAME` | No | Friendly name for the sensor/device (default `Water meter`) |
 | `MQTT_SW_VERSION` | No | Reported firmware/software version (default `1.0`) |
+| `MQTT_AVAILABILITY_TOPIC` | No | Override the default `{reading_topic}/availability` sibling topic |
+| `MQTT_PUBLISH_ON_CHANGE` | No | Set to `1` to publish MQTT only when `consumption` changes (health log still updates every cycle) |
+| `MQTT_HEARTBEAT_SEC` | No | With `MQTT_PUBLISH_ON_CHANGE=1`, force a publish at least this often (seconds) even if unchanged |
+
+### Timing and behavior
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `POLL_INTERVAL_SEC` | `60` | Sleep between read cycles after killing `rtl_tcp` |
+| `RTL_TCP_STARTUP_SEC` | `10` | Wait after starting `rtl_tcp` before `rtlamr` |
+| `WATCHDOG_MINUTES` | `30` | Staleness window for `updated.log` (same semantics as the original shell watchdog) |
 
 ### Home Assistant MQTT discovery
 
@@ -99,7 +127,7 @@ When `MQTT_HOST` is set and `MQTT_DISABLE_DISCOVERY` is **not** `1`, the contain
 
 (Non-alphanumeric characters in `METERID` are replaced with `_` in the topic `object_id`.)
 
-In Home Assistant, ensure the MQTT integration has **discovery** enabled (it is on by default). The **Water meter** sensor should appear automatically; no manual `configuration.yaml` entry is required for the sensor itself.
+In Home Assistant, ensure the MQTT integration has **discovery** enabled (it is on by default). The **Water meter** sensor should appear automatically; no manual `configuration.yaml` entry is required for the sensor itself. The entity respects **availability** (online/offline) from MQTT.
 
 ### Reading payload (`meter/payload.py`)
 
@@ -159,9 +187,15 @@ Here's the full breakdown:
     - Choose your account and allow access to your Drive
       - There might be some scary messaging here from Google about allowing an unverified script to have access to your account, but the only script that has access is the version you're currently editing.
     - ** Copy the 'Current web app URL:' on the final step after clicking deploy **
-6. The URL from the last step is now your URL you'll need to setup in Resin
+6. The URL from the last step is the endpoint for **`CURL_API`**
     - Should look like `https://script.google.com/macros/u/1/s/RandomLookingScriptID/exec`
-    - In Resin add the environment variable CURL_API with the value of the script from before, but with '?value=' appended
+    - In your `.env` (or `docker-compose` environment), set `CURL_API` to that URL with `?value=` appended
         -  eg. "https://script.google.com/macros/s/RandomLookingScriptID/exec?value="
     - To test it you can send some data with 'curl: `curl -L https://script.google.com/macros/u/1/s/RandomLookingScriptID/exec?value=10`
+
+## Development and CI
+
+- **Tests:** `pip install -r requirements-dev.txt` then `pytest`.
+- **Image build:** `docker build -t atlanta-water-meter .`
+- **GitHub Actions** (`.github/workflows/ci.yml`) runs **pytest** on Python 3.12 and **`docker build`** on every push/PR.
 

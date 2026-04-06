@@ -7,6 +7,8 @@ import os
 import re
 import sys
 
+from meter.topics import resolve_availability_topic
+
 
 def object_id(meter_id: str) -> str:
     s = re.sub(r"[^a-zA-Z0-9_-]", "_", meter_id)
@@ -28,9 +30,10 @@ def build_discovery_config(
     meter_id: str,
     device_name: str,
     sw_version: str,
+    availability_topic: str | None = None,
 ) -> dict:
     uid = unique_id(meter_id)
-    return {
+    cfg: dict = {
         "name": device_name,
         "unique_id": uid,
         "state_topic": state_topic,
@@ -47,6 +50,11 @@ def build_discovery_config(
             "sw_version": sw_version,
         },
     }
+    if availability_topic:
+        cfg["availability_topic"] = availability_topic
+        cfg["payload_available"] = "online"
+        cfg["payload_not_available"] = "offline"
+    return cfg
 
 
 def main() -> None:
@@ -56,6 +64,7 @@ def main() -> None:
     meter_id = os.environ["METERID"]
     device_name = os.environ.get("MQTT_DEVICE_NAME", "Water meter")
     sw_version = os.environ.get("MQTT_SW_VERSION", "1.0")
+    avail = os.environ.get("MQTT_AVAILABILITY_TOPIC") or resolve_availability_topic(state_topic)
     topic = discovery_topic(meter_id, prefix)
     cfg = build_discovery_config(
         state_topic=state_topic,
@@ -63,6 +72,7 @@ def main() -> None:
         meter_id=meter_id,
         device_name=device_name,
         sw_version=sw_version,
+        availability_topic=avail,
     )
     sys.stdout.write(topic + "\n")
     json.dump(cfg, sys.stdout, separators=(",", ":"))

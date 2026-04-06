@@ -1,0 +1,17 @@
+services:
+  water-meter:
+    build: .
+    container_name: atlanta-water-meter
+    restart: unless-stopped
+    # RTL-SDR USB access; if your dongle works without full privilege, try removing this
+    privileged: true
+    devices:
+      - /dev/bus/usb
+    env_file:
+      - .env
+    healthcheck:
+      test: ["CMD", "python3", "-m", "meter.healthcheck"]
+      interval: 2m
+      timeout: 15s
+      retries: 3
+      start_period: 5m
